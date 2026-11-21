@@ -1,0 +1,9 @@
+# Ghidra projects: stay on disk, not in git (exports in ghidra/export/ are tracked)
+**/ghidra/*.rep/
+**/ghidra/*.gpr
+**/ghidra/*.lock
+**/ghidra/*.lock~
+
+# debugger history
+gdb_history
+.gdb_history
