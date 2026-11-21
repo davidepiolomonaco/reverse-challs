@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# newchall — create the folder for a new reverse engineering challenge.
+set -euo pipefail
+
+# resolve symlinks portably (readlink -f is missing on older macOS)
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case $link in /*) self=$link ;; *) self="$(dirname "$self")/$link" ;; esac
+done
+ROOT="$(cd "$(dirname "$self")" && pwd)"
+TEMPLATE="$ROOT/_template/writeup.md"
+
+usage() {
+cat <<EOF
+Usage:
+  newchall <source> <name> [file ...]
+  newchall -l | --list
+  newchall -h | --help
+
+Creates  $ROOT/<source>/<name>/  containing:
+  bin/         original files, read-only (never touched)
+  work/        writable copy of the same files: patch and run things here
+  writeup.md   built from the template, with name, source, date, SHA256 and
+               file type already filled in
+
+Arguments:
+  source   where the challenge comes from (e.g. crackmes.one, dalctf2026).
+           Created if it does not exist.
+  name     challenge name, usually numbered (e.g. 012-name)
+  file     one or more binaries to copy into bin/ (optional)
+
+Options:
+  -l, --list   list existing sources and challenges
+  -h, --help   show this help
+
+Examples:
+  newchall crackmes.one 012-easy ~/Downloads/easy
+  newchall dalctf2026 rev-01 ./chall ./libc.so.6
+  newchall glacierctf-2026 web-03          # folder and writeup only, no binary
+
+Notes:
+  - Never overwrites: if the challenge already exists, it exits with an error.
+  - bin/ is the pristine original (read-only, hash in the writeup). Patch and
+    run the copy in work/; to start over: cp bin/<file> work/<file>.
+  - Edit the template in $TEMPLATE
+    (writeups already created are not changed).
+  - Ghidra projects live in <source>/ghidra/ and are created from Ghidra.
+EOF
+}
+
+# sha256 of a file: Linux has sha256sum, macOS has shasum
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+die() { echo "newchall: $*" >&2; echo "Try 'newchall --help'." >&2; exit 1; }
+
+list() {
+    for s in "$ROOT"/*/; do
+        s=${s%/}; n=$(basename "$s")
+        [[ $n == _* ]] && continue
+        echo "$n/"
+        for c in "$s"/*/; do
+            [ -d "$c" ] || continue
+            c=${c%/}; [ "$(basename "$c")" = ghidra ] && continue
+            echo "  $(basename "$c")"
+        done
+    done
+}
+
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+    -l|--list) list; exit 0 ;;
+    -*)        die "unknown option: $1" ;;
+esac
+
+[ $# -ge 2 ] || { usage >&2; exit 1; }
+
+src=$1; name=$2; shift 2
+[[ $src == */* || $name == */* ]] && die "source and name cannot contain '/'"
+[[ $src == _* || $src == .* ]]    && die "invalid source name: $src"
+[ -f "$TEMPLATE" ] || die "template missing: $TEMPLATE"
+
+d="$ROOT/$src/$name"
+[ -e "$d" ] && die "already exists: $d"
+
+# check the files BEFORE creating anything
+for f in "$@"; do [ -f "$f" ] || die "file not found: $f"; done
+
+mkdir -p "$d/bin" "$d/work"
+for f in "$@"; do cp -a -- "$f" "$d/bin/"; done
+
+files=(); shas=(); types=()
+for f in "$@"; do
+    b=$(basename "$f"); files+=("$b")
+    shas+=("$(sha256 "$d/bin/$b")")
+    types+=("$(file -b "$d/bin/$b" | cut -d, -f1-2)")
+done
+
+join() { local IFS="$1"; shift; echo "$*"; }
+if [ ${#files[@]} -eq 1 ]; then
+    f_txt=${files[0]}; s_txt=${shas[0]}; t_txt=${types[0]}
+elif [ ${#files[@]} -gt 1 ]; then
+    f_txt=$(join , "${files[@]}")
+    s_txt=""; for i in "${!files[@]}"; do s_txt+="${files[$i]}: ${shas[$i]}<br>"; done; s_txt=${s_txt%<br>}
+    t_txt=$(join ';' "${types[@]}")
+else
+    f_txt=""; s_txt=""; t_txt=""
+fi
+
+# python avoids problems with special characters (|, &, \) in the values
+python3 -I - "$TEMPLATE" "$d/writeup.md" "$name" "$src" "$(date +%F)" "$f_txt" "$s_txt" "$t_txt" <<'PY'
+import sys
+tpl, out, name, src, date, f, sha, ty = sys.argv[1:]
+t = open(tpl).read()
+for k, v in {"NAME": name, "SOURCE": src, "DATE": date, "FILE": f, "SHA256": sha, "FILETYPE": ty}.items():
+    t = t.replace("{{%s}}" % k, v)
+open(out, "w").write(t)
+PY
+
+if [ $# -gt 0 ]; then
+    cp -a "$d/bin/." "$d/work/"
+    chmod -R u+w "$d/work"
+    chmod -R a-w "$d/bin"
+fi
+echo "$d"
